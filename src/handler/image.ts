@@ -15,6 +15,66 @@ const JPEG = 'image/jpeg'
 const GIF = 'image/gif'
 const SVG = 'image/svg+xml'
 
+function parseWEBP(buf: ArrayBuffer) {
+  const data = new Uint8Array(buf)
+
+  if (
+    String.fromCharCode(...data.slice(0, 4)) !== 'RIFF' ||
+    String.fromCharCode(...data.slice(8, 12)) !== 'WEBP'
+  ) {
+    throw new Error('Invalid WebP')
+  }
+
+  let offset = 12
+  while (offset < data.length) {
+    const chunkType = String.fromCharCode(...data.slice(offset, offset + 4))
+
+    if (chunkType === 'VP8 ') {
+      // Lossy: Width/Height at fixed offsets
+      // https://datatracker.ietf.org/doc/html/rfc6386#section-19.1
+      const view = new DataView(buf)
+      const startOfVP8 = offset + 8
+      const width = view.getUint16(startOfVP8 + 6, true)
+      const height = view.getUint16(startOfVP8 + 8, true)
+      return [width, height] as [number, number]
+    } else if (chunkType === 'VP8L') {
+      // Lossless: Width/Height in the 5th byte
+      // https://developers.google.com/speed/webp/docs/webp_lossless_bitstream_specification#3_riff_header
+      const view = new DataView(buf, offset, 2)
+      const startOfVP8 = offset + 8
+      const dimensions = view.getUint32(startOfVP8, true)
+
+      // Decode dimensions from VP8L format
+      const rawWidth = dimensions & 0x3fff
+      const rawHeight = (dimensions >> 14) & 0x3fff
+
+      // Stored dimensions are always off by one
+      return [rawWidth + 1, rawHeight + 1] as [number, number]
+    } else if (chunkType === 'VP8X') {
+      // Extended: Width/Height are 24-bit values
+      // https://developers.google.com/speed/webp/docs/riff_container#extended_file_format
+      const rawWidth =
+        (data[offset + 12] |
+          (data[offset + 13] << 8) |
+          (data[offset + 14] << 16)) &
+        0xffffff
+      const rawHeight =
+        (data[offset + 15] |
+          (data[offset + 16] << 8) |
+          (data[offset + 17] << 16)) &
+        0xffffff
+
+      // Stored dimensions are always off by one
+      return [rawWidth + 1, rawHeight + 1] as [number, number]
+    }
+
+    const chunkSize = new DataView(buf, offset + 4, 4).getUint32(0, true)
+    offset += 8 + chunkSize
+  }
+
+  throw new Error('No VP8 chunk found')
+}
+
 function parseJPEG(buf: ArrayBuffer) {
   const view = new DataView(buf)
 
@@ -130,6 +190,9 @@ function arrayBufferToDataUri(data: ArrayBuffer) {
     case JPEG:
       imageSize = parseJPEG(data)
       break
+    case WEBP:
+      imageSize = parseWEBP(data)
+      break
   }
 
   if (!ALLOWED_IMAGE_TYPES.includes(imageType)) {
@@ -208,6 +271,9 @@ export async function resolveImageData(
           break
         case JPEG:
           imageSize = parseJPEG(data)
+          break
+        case WEBP:
+          imageSize = parseWEBP(data)
           break
       }
       cache.set(src, [src, ...imageSize])
